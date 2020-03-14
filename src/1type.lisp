@@ -79,6 +79,15 @@ during computation.")
     ((_ '*) '*)
     ((_ _) (* x y))))
 
+(defun %interval-expt (x y)
+  (match* (x y)
+    ;; since '* does not mean infinity, (* 0 '*) = 0
+    (((= 0) _    ) 0)
+    (((= 1) _    ) 1)
+    ((_     (= 0)) 1)
+    (('*    (= 1)) '*)
+    ((_ _) (expt x y))))
+
 (defun %interval-divlike (fn x y)
   (match* (x y)
     ;; compute the maximum of x+ε / y+ε
@@ -123,6 +132,8 @@ during computation.")
           (reduce #'interval2-max (list v0 v1 v2 v3)))))
 
 (defun interval-mul (l1 h1 l2 h2) (interval-op '%interval-mul l1 h1 l2 h2))
+
+(defun interval-expt (l1 h1 l2 h2) (interval-op '%interval-expt l1 h1 l2 h2))
 
 (defun interval-div       (l1 h1 l2 h2) (interval-op '%interval-div       l1 h1 l2 h2))
 (defun interval-round     (l1 h1 l2 h2) (interval-op '%interval-round     l1 h1 l2 h2))

@@ -109,6 +109,11 @@ interprets a form consisting of functions and type specifiers (at the leafs).
        (infer-rational-arithmetic-result #'interval-div (list '(integer 1 1) first) *numcl-default-float-format*))))
 
 (set-type-inferer
+ 'expt
+ (defun expt-to-float-type (&rest typespecs)
+   (infer-rational-arithmetic-result #'interval-expt typespecs 'integer)))
+
+(set-type-inferer
  'max
  (defun max-to-float-type (&rest typespecs)
    (infer-rational-arithmetic-result #'interval-max typespecs 'integer)))
