@@ -44,29 +44,54 @@ interprets a form consisting of functions and type specifiers (at the leafs).
         (warn "Missing type inference function for ~a, defaults to T" name)
         t)))
 
-(defun interpret-type (form)
-  "Form is a cons tree in which:
+(let (cache)
+  (defun interpret-type (form)
+    "Form is a cons tree in which:
  form : (inferer args*)
- arg  : type | form "
-  (ematch form
+ arg  : type | form | singleton
+ singleton : number "
+    (if (null cache)
+        (unwind-protect
+             (progn (setf cache (make-hash-table :test 'equal))
+                    (print :setup)
+                    (interpret-type form))
+          (setf cache nil))
+        (multiple-value-bind (res found) (gethash form cache)
+          (if found
+              res
+              (setf (gethash form cache) (%interpret-type form)))))))
+
+(defun %interpret-type (form)
+  (match form
+    ;; interpret lambda form
     ((list* (list 'lambda (list* arg args) body) type types)
      (interpret-type
       `((lambda ,args ,(subst type arg body)) ,@types)))
     ((list (list 'lambda nil body))
      (interpret-type
       body))
-    ((list* name types)
-     (if (inferer-boundp name)
-         (apply #'infer-type
-                name
-                (mapcar #'interpret-type types))
-         form))
+    ;; if the head is a name of inferer, run it
+    ((list* (and name (satisfies inferer-boundp)) types)
+     (apply #'infer-type
+            name
+            (mapcar #'interpret-type types)))
+    ;; if it is a cons which is not an inferer, it should be
+    ;; a type specifier. Expand it
+    ((type cons)
+     (typexpand form))
+    ;; if it is a nil, it should be a NIL type.
+    (nil
+     nil)
+    ;; For any type (X ...), X itself is also a valid type specifier.
+    ((type symbol)
+     (typexpand form))
+    ;; special handling of numbers.
+    ((type number)
+     (if (realp form)
+         `(,(first (ensure-list (type-of form))) ,form ,form)
+         'complex))
     (_
-     (if (numberp form)
-         (if (realp form)
-             `(,(first (ensure-list (type-of form))) ,form ,form)
-             'complex)
-         form))))
+     (error "INTERPRET-TYPE: invalid value ~a " form))))
 
 (defun funcall* (fn x &optional (default '*))
   (if (numberp x)
@@ -79,11 +104,15 @@ interprets a form consisting of functions and type specifiers (at the leafs).
 
 ;; (interpret-type '(+ (integer 0 100) (integer -10 100))) -> (integer -10 200)
 
+;;; basic arithmetic functions
+
+;; +
 (set-type-inferer
  '+
  (defun add-to-float-type (&rest typespecs)
    (infer-rational-arithmetic-result #'interval-add typespecs 'integer)))
 
+;; -
 (set-type-inferer
  '-
  (defun sub-to-float-type (first &rest typespecs)
@@ -94,6 +123,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
 ;; (sub-to-float-type '(integer 3 5))
 ;; --> (integer -5 -3)
 
+;; *
 (set-type-inferer
  '*
  (defun mul-to-float-type (&rest typespecs)
@@ -101,6 +131,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
 
 ;; division may result in ratios; we coerce it into *numcl-default-float-format*
 
+;; /
 (set-type-inferer
  '/
  (defun div-to-float-type (first &rest typespecs)
@@ -108,6 +139,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
        (infer-rational-arithmetic-result #'interval-div (cons first typespecs) *numcl-default-float-format*)
        (infer-rational-arithmetic-result #'interval-div (list '(integer 1 1) first) *numcl-default-float-format*))))
 
+;; max
 (set-type-inferer
  'expt
  (defun expt-to-float-type (&rest typespecs)
@@ -118,13 +150,15 @@ interprets a form consisting of functions and type specifiers (at the leafs).
  (defun max-to-float-type (&rest typespecs)
    (infer-rational-arithmetic-result #'interval-max typespecs 'integer)))
 
+;; min
 (set-type-inferer
  'min
  (defun min-to-float-type (&rest typespecs)
    (infer-rational-arithmetic-result #'interval-min typespecs 'integer)))
 
-;; transcendental functions
+;;; transcendental functions
 
+;; cos
 (set-type-inferer
  'cos
  (defun cos-inferer (x)
@@ -136,30 +170,15 @@ interprets a form consisting of functions and type specifiers (at the leafs).
         ,(coerce -1 %float%)
         ,(coerce 1 %float%)))
      ((real-subtype low high)
-      (assert (< low high))
-      (let* ((low-next-quater-n (ceiling low +quater+))
-             ;; 0+4n->0+4n ; 1+4n->0+4(n+1); 2+4n->0+4(n+1); 3+4n->0+4(n+1)
-             (low-next-r (* +quater+ (+ (* 4 (ceiling (- low-next-quater-n 0) 4)) 0)))
-             ;; 0+4n->1+4n ; 1+4n->1+4n; 2+4n->1+4(n+1); 3+4n->1+4(n+1)
-             ;; (low-next-t (* +quater+ (+ (* 4 (ceiling (- low-next-quater-n 1) 4)) 1)))
-             ;; 0+4n->2+4n ; 1+4n->2+4n; 2+4n->2+4n; 3+4n->2+4(n+1)
-             (low-next-l (* +quater+ (+ (* 4 (ceiling (- low-next-quater-n 2) 4)) 2)))
-             ;; 0+4n->3+4n ; 1+4n->3+4n; 2+4n->3+4n; 3+4n->3+4n
-             ;; (low-next-b (* +quater+ (+ (* 4 (ceiling (- low-next-quater-n 3) 4)) 3)))
-             (high-previous-quater-n (floor high +quater+))
-             ;; 0+4n->0+4n ; 1+4n->0+4n; 2+4n->0+4n; 3+4n->0+4n
-             (high-previous-r (* +quater+ (+ (* 4 (floor (- high-previous-quater-n 0) 4)) 0)))
-             ;; 0+4n->1+4(n-1) ; 1+4n->1+4n; 2+4n->1+4n; 3+4n->1+4n
-             ;; (high-previous-t (* +quater+ (+ (* 4 (floor (- high-previous-quater-n 1) 4)) 1)))
-             ;; 0+4n->2+4(n-1) ; 1+4n->2+4(n-1); 2+4n->2+4n; 3+4n->2+4n
-             (high-previous-l (* +quater+ (+ (* 4 (floor (- high-previous-quater-n 2) 4)) 2)))
-             ;; 0+4n->3+4(n-1) ; 1+4n->3+4(n-1); 2+4n->3+4(n-1); 3+4n->3+4n
-             ;; (high-previous-b (* +quater+ (+ (* 4 (floor (- high-previous-quater-n 3) 4)) 3)))
-             )
+      (assert (<= low high))
+      (let* ((low-next-pi      (* pi (ceiling low pi)))
+             (high-prev-pi     (* pi (floor high pi))))
         (flet ((in-range (x) (<= low x high)))
+          (let ((keypoints (remove-if-not #'in-range (list low  low-next-pi  (+ low-next-pi pi)
+                                                           high high-prev-pi (- high-prev-pi pi)))))
           `(,%float%
-            ,(coerce (reduce #'min (remove-if-not #'in-range (list low low-next-r high-previous-r high)) :key #'cos) %float%)
-            ,(coerce (reduce #'max (remove-if-not #'in-range (list low low-next-l high-previous-l high)) :key #'cos) %float%)))))
+            ,(coerce (reduce #'min keypoints :key #'cos) %float%)
+            ,(coerce (reduce #'max keypoints :key #'cos) %float%))))))
      ((complex-type)
       ;; TBD
       'complex)
@@ -172,6 +191,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
 
 (set-type-inferer 'tan (defun tan-inferer (x) (interpret-type `(/ (sin ,x) (cos ,x)))))
 
+;; exp
 (set-type-inferer
  'exp
  (defun exp-inferer (x)
@@ -188,6 +208,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
      ((and-type types)
       (reduce #'intersection-to-float-type types :key #'exp-inferer)))))
 
+;; log
 (set-type-inferer
  'log
  (defun log-inferer (x)
@@ -211,6 +232,9 @@ interprets a form consisting of functions and type specifiers (at the leafs).
      ((and-type types)
       (reduce #'intersection-to-float-type types :key #'log-inferer)))))
 
+(set-type-inferer 'expt (defun expt-inferer (base power) (interpret-type `(exp (* (log ,base) ,power)))))
+
+;; %log2
 (set-type-inferer
  '%log2
  (defun %log2-inferer (x)
@@ -255,12 +279,15 @@ interprets a form consisting of functions and type specifiers (at the leafs).
 
 (set-type-inferer 'tanh (defun tanh-inferer (x) (interpret-type `(/ (sinh ,x) (cosh ,x)))))
 
-;; (set-type-inferer 'coth (defun coth-inferer (x) (interpret-type `(/ (cosh ,x) (sinh ,x)))))
-;; 
-;; (set-type-inferer 'sech (defun cosh-inferer (x) (interpret-type `(/ 2 (+ (exp ,x) (exp (- ,x)))))))
-;; 
-;; (set-type-inferer 'cosech (defun sinh-inferer (x) (interpret-type `(/ 2 (- (exp ,x) (exp (- ,x)))))))
+(set-type-inferer 'acosh (defun acosh-inferer (x) (interpret-type `(* 2 (log (+ (sqrt (/ (+ x, 1) 2)) (sqrt (/ (- x, 1) 2))))))))
 
+(set-type-inferer 'asinh (defun asinh-inferer (x) (interpret-type `(log (+ ,x (sqrt (+ 1 (* ,x ,x))))))))
+
+(set-type-inferer 'atanh (defun atanh-inferer (x) (interpret-type `(/ (- (log (+ 1 ,x)) (log (- 1 ,x))) 2))))
+
+
+
+;; acos
 (set-type-inferer
  'acos
  (defun acos-inferer (x)
@@ -281,6 +308,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
      ((and-type types)
       (reduce #'intersection-to-float-type types :key #'acos-inferer)))))
 
+;; asin
 (set-type-inferer
  'asin
  (defun asin-inferer (x)
@@ -301,6 +329,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
      ((and-type types)
       (reduce #'intersection-to-float-type types :key #'asin-inferer)))))
 
+;; atan
 (set-type-inferer
  'atan
  (defun atan-inferer (x)
@@ -318,6 +347,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
      ((and-type types)
       (reduce #'intersection-to-float-type types :key #'atan-inferer)))))
 
+;; abs
 (set-type-inferer
  'abs
  (defun abs-inferer (x)
@@ -338,10 +368,12 @@ interprets a form consisting of functions and type specifiers (at the leafs).
      ((and-type types)
       (reduce #'intersection-to-float-type types :key #'abs-inferer)))))
 
-;; floor is same as / except the handling of integer-integer
+;;; float rounding functions
 
+;; floor
 (set-type-inferer
  'floor
+ ;; same as / except the handling of integer-integer
  (defun floor-inferer (x &optional (y '(integer 1 1)))
    (declare (trivia:optimizer :trivial))
    (ematch* (x y)
@@ -354,6 +386,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
       (reduce #'intersection-to-float-type
               (mapcar #'floor-inferer types1 types2))))))
 
+;; round
 (set-type-inferer
  'round
  (defun round-inferer (x &optional (y '(integer 1 1)))
@@ -368,6 +401,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
       (reduce #'intersection-to-float-type
               (mapcar #'round-inferer types1 types2))))))
 
+;; ceiling
 (set-type-inferer
  'ceiling
  (defun ceiling-inferer (x &optional (y '(integer 1 1)))
@@ -382,6 +416,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
       (reduce #'intersection-to-float-type
               (mapcar #'ceiling-inferer types1 types2))))))
 
+;; truncate
 (set-type-inferer
  'truncate
  (defun truncate-inferer (x &optional (y '(integer 1 1)))
@@ -398,6 +433,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
 
 (set-type-inferer 'mod 'intersection-to-float-type)
 
+;; rem
 (set-type-inferer
  'rem
  (defun rem-inferer (x y)
@@ -438,6 +474,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
 (defun float          (x) )
 |#
 
+;;; comparison functions
 
 (set-type-inferer '=/bit (constantly 'bit))
 (set-type-inferer '/=/bit (constantly 'bit))
@@ -446,6 +483,9 @@ interprets a form consisting of functions and type specifiers (at the leafs).
 (set-type-inferer '>/bit (constantly 'bit))
 (set-type-inferer '</bit (constantly 'bit))
 
+;;; bitwise functions
+
+;; logior
 (set-type-inferer
  'logior
  (defun infer-logior (x y)
@@ -471,6 +511,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
                   (mapcar (lambda (type) (fn prev type)) types2))))))
      (fn x y))))
 
+;; logand
 (set-type-inferer
  'logand
  (defun infer-logand (x y)
@@ -496,6 +537,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
                   (mapcar (lambda (type) (fn prev type)) types2))))))
      (fn x y))))
 
+;; logeqv
 (set-type-inferer
  'logeqv
  (defun infer-logeqv (x y)
@@ -520,6 +562,7 @@ interprets a form consisting of functions and type specifiers (at the leafs).
 
 (set-type-inferer 'logxor 'infer-logeqv)
 
+;; lognot
 (set-type-inferer
  'lognot
  (defun infer-lognot (x)
@@ -548,7 +591,10 @@ interprets a form consisting of functions and type specifiers (at the leafs).
 (set-type-inferer 'logorc2 (defun infer-logorc2 (x y) (infer-logior x (infer-lognot y))))
 (set-type-inferer 'lognand (defun infer-lognand (x y) (infer-lognot (infer-logand x y))))
 (set-type-inferer 'lognor  (defun infer-lognor  (x y) (infer-lognot (infer-logior x y))))
-  
+
+;;; complex functions
+
+;; conjugate
 (set-type-inferer
  'conjugate
  (defun conjugate-inferer (x)
@@ -563,3 +609,16 @@ interprets a form consisting of functions and type specifiers (at the leafs).
      ((and-type types)
       (reduce #'intersection-to-float-type types :key #'conjugate-inferer)))))
 
+;; Note on SQRT:
+;; According to CLHS,
+;;
+;;  If number is a positive rational, it is implementation-dependent whether
+;;  root is a rational or a float. If number is a negative rational, it is
+;;  implementation-dependent whether root is a complex rational or a
+;;  complex float.
+;;
+;; However, numcl always assume it is converted to float.
+;; 
+(set-type-inferer 'sqrt (defun sqrt-inferer (x) (interpret-type `(exp (/ (log ,x) 2)))))
+
+(set-type-inferer 'isqrt (defun isqrt-inferer (x) (interpret-type `(floor (sqrt ,x)))))

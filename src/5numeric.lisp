@@ -452,16 +452,6 @@ NUMCL.  If not, see <http://www.gnu.org/licenses/>.
   ;; ;; `(1 3 2)                                           : constant
   )
 
-#+(or)
-(defun numcl:sin (x)
-  (if (numberp x)
-      (sin x)
-      (let ((y (empty (shape x) :type (infer-type 'sin (array-element-type x)))))
-        (einsum '(i -> (sin $1) -> i)
-                (flatten x)
-                (flatten y))
-        y)))
-
 (defmacro define-simple-mapper (numcl-fn cl-fn)
   `(defun ,numcl-fn (x)
      (if (numberp x)
@@ -472,6 +462,8 @@ NUMCL.  If not, see <http://www.gnu.org/licenses/>.
                    (flatten y))
            y))))
 
+(define-simple-mapper numcl:sqrt sqrt)
+(define-simple-mapper numcl:isqrt isqrt)
 (define-simple-mapper numcl:sin sin)
 (define-simple-mapper numcl:cos cos)
 (define-simple-mapper numcl:tan tan)
@@ -481,6 +473,9 @@ NUMCL.  If not, see <http://www.gnu.org/licenses/>.
 (define-simple-mapper numcl:sinh sinh)
 (define-simple-mapper numcl:cosh cosh)
 (define-simple-mapper numcl:tanh tanh)
+(define-simple-mapper numcl:asinh asinh)
+(define-simple-mapper numcl:acosh acosh)
+(define-simple-mapper numcl:atanh atanh)
 (define-simple-mapper numcl:exp exp)
 (define-simple-mapper numcl:log log)
 (define-simple-mapper numcl:sqrt sqrt)
@@ -522,8 +517,8 @@ NUMCL.  If not, see <http://www.gnu.org/licenses/>.
 
 (declaim (inline numcl:+ numcl:- numcl:* numcl:/ numcl:max numcl:min numcl:clip))
 
-(defun numcl:+   (&rest args) (reduce (lambda (x y) (broadcast '+ x y)) args))
-(defun numcl:*   (&rest args) (reduce (lambda (x y) (broadcast '* x y)) args))
+(defun numcl:+   (&rest args) (reduce (lambda (x y) (broadcast '+ x y)) args :initial-value 0))
+(defun numcl:*   (&rest args) (reduce (lambda (x y) (broadcast '* x y)) args :initial-value 1))
 (defun numcl:max (&rest args) (reduce (lambda (x y) (broadcast 'max x y)) args))
 (defun numcl:min (&rest args) (reduce (lambda (x y) (broadcast 'min x y)) args))
 
@@ -584,14 +579,41 @@ NUMCL.  If not, see <http://www.gnu.org/licenses/>.
 (declaim (inline >/bit))
 (defun >/bit  (x y) (if (>  x y) 1 0))
 
+(declaim (inline =/2 /=/2 <=/2 >=/2 </2 >/2))
+(declaim (inline boolean-wrapper))
+
+(defun =/2  (x y) (broadcast '=/bit  x y :atomic #'= ))
+(defun /=/2 (x y) (broadcast '/=/bit x y :atomic #'/=))
+(defun <=/2 (x y) (broadcast '<=/bit x y :atomic #'<=))
+(defun >=/2 (x y) (broadcast '>=/bit x y :atomic #'>=))
+(defun </2  (x y) (broadcast '</bit  x y :atomic #'< ))
+(defun >/2  (x y) (broadcast '>/bit  x y :atomic #'> ))
+
+(defun boolean-wrapper (x y more binary multiary)
+  (declare (function binary multiary))
+  (let ((result (funcall binary x y)))
+    (if more
+        (let ((result2 (apply multiary y more)))
+          (numcl:logand result result2))
+        result)))
+
+#+(or)
+(defun numcl:=  (x y &rest more)
+  (let ((result (funcall #'=/2 x y)))
+    (if more
+        (let ((result2 (apply #'numcl:= y more)))
+          (numcl:logand result result2))
+        result)))
+
 (declaim (inline numcl:= numcl:/= numcl:<= numcl:>= numcl:< numcl:>))
 
-(defun numcl:=  (x y) (broadcast '=/bit  x y :atomic #'= ))
-(defun numcl:/= (x y) (broadcast '/=/bit x y :atomic #'/=))
-(defun numcl:<= (x y) (broadcast '<=/bit x y :atomic #'<=))
-(defun numcl:>= (x y) (broadcast '>=/bit x y :atomic #'>=))
-(defun numcl:<  (x y) (broadcast '</bit  x y :atomic #'< ))
-(defun numcl:>  (x y) (broadcast '>/bit  x y :atomic #'> ))
+(defun numcl:=  (x y &rest more) (boolean-wrapper x y more #'=/2  #'numcl:= ))
+(defun numcl:/= (x y &rest more) (boolean-wrapper x y more #'/=/2 #'numcl:/=))
+(defun numcl:<= (x y &rest more) (boolean-wrapper x y more #'<=/2 #'numcl:<=))
+(defun numcl:>= (x y &rest more) (boolean-wrapper x y more #'>=/2 #'numcl:>=))
+(defun numcl:<  (x y &rest more) (boolean-wrapper x y more #'</2  #'numcl:<))
+(defun numcl:>  (x y &rest more) (boolean-wrapper x y more #'>/2  #'numcl:>))
+
 
 ;; better trivia pattern integration
 
